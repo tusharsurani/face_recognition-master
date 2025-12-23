@@ -1,0 +1,7 @@
+streamlit
+opencv-python
+numpy
+pillow
+scipy
+face_recognition
+git+https://github.com/ageitgey/face_recognition_models
