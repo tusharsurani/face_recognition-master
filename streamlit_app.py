@@ -1,5 +1,5 @@
 import streamlit as st
-import face_recognition
+from deepface import DeepFace
 import cv2
 import numpy as np
 from PIL import Image, ImageDraw
@@ -45,11 +45,11 @@ st.markdown("""
 def load_known_faces():
     """Load known face encodings"""
     try:
-        obama_image = face_recognition.load_image_file("examples/obama.jpg")
-        obama_face_encoding = face_recognition.face_encodings(obama_image)[0]
+        obama_image = cv2.imread("examples/obama.jpg")
+        obama_face_encoding = DeepFace.represent(obama_image, model_name='VGG-Face', enforce_detection=False)[0]['embedding']
         
-        biden_image = face_recognition.load_image_file("examples/biden.jpg")
-        biden_face_encoding = face_recognition.face_encodings(biden_image)[0]
+        biden_image = cv2.imread("examples/biden.jpg")
+        biden_face_encoding = DeepFace.represent(biden_image, model_name='VGG-Face', enforce_detection=False)[0]['embedding']
         
         known_face_encodings = [
             obama_face_encoding,
@@ -69,36 +69,46 @@ def process_image_recognition(image, known_face_encodings, known_face_names):
     """Process image for face detection and recognition"""
     image_array = np.array(image)
     frame = cv2.cvtColor(image_array, cv2.COLOR_RGB2BGR)
-    small_frame = cv2.resize(frame, (0, 0), fx=0.25, fy=0.25)
-    rgb_small_frame = cv2.cvtColor(small_frame, cv2.COLOR_BGR2RGB)
     
-    face_locations = face_recognition.face_locations(rgb_small_frame)
-    face_encodings = face_recognition.face_encodings(rgb_small_frame, face_locations)
+    # Detect faces
+    try:
+        faces = DeepFace.extract_faces(frame, enforce_detection=False)
+    except:
+        faces = []
+    
+    face_locations = []
+    face_encodings = []
+    for face in faces:
+        facial_area = face['facial_area']
+        face_locations.append((facial_area['y'], facial_area['x'] + facial_area['w'], facial_area['y'] + facial_area['h'], facial_area['x']))  # top, right, bottom, left
+        face_img = face['face']
+        face_img = (face_img * 255).astype(np.uint8)
+        try:
+            encoding = DeepFace.represent(face_img, model_name='VGG-Face', enforce_detection=False)[0]['embedding']
+            face_encodings.append(encoding)
+        except:
+            face_encodings.append(None)
     
     face_names = []
     for face_encoding in face_encodings:
-        matches = face_recognition.compare_faces(known_face_encodings, face_encoding, tolerance=0.6)
+        if face_encoding is None:
+            face_names.append("Unknown")
+            continue
         name = "Unknown"
-        
-        face_distances = face_recognition.face_distance(known_face_encodings, face_encoding)
-        if len(face_distances) > 0:
-            best_match_index = np.argmin(face_distances)
-            if best_match_index < len(matches) and matches[best_match_index]:
-                name = known_face_names[best_match_index]
-        
+        min_distance = float('inf')
+        for known_encoding, known_name in zip(known_face_encodings, known_face_names):
+            distance = np.linalg.norm(np.array(face_encoding) - np.array(known_encoding))
+            if distance < 0.5:  # threshold
+                if distance < min_distance:
+                    min_distance = distance
+                    name = known_name
         face_names.append(name)
     
     output_image = image_array.copy()
     for (top, right, bottom, left), name in zip(face_locations, face_names):
-        top *= 4
-        right *= 4
-        bottom *= 4
-        left *= 4
-        
         cv2.rectangle(output_image, (left, top), (right, bottom), (0, 0, 255), 2)
         cv2.rectangle(output_image, (left, bottom - 35), (right, bottom), (0, 0, 255), cv2.FILLED)
-        font = cv2.FONT_HERSHEY_DUPLEX
-        cv2.putText(output_image, name, (left + 6, bottom - 6), font, 0.6, (255, 255, 255), 1)
+        cv2.putText(output_image, name, (left + 6, bottom - 6), cv2.FONT_HERSHEY_DUPLEX, 0.6, (255, 255, 255), 1)
     
     output_image_rgb = cv2.cvtColor(output_image, cv2.COLOR_BGR2RGB)
     return output_image_rgb, face_names, len(face_locations)
@@ -106,91 +116,48 @@ def process_image_recognition(image, known_face_encodings, known_face_names):
 def detect_faces(image, model="hog"):
     """Detect faces in image using HOG or CNN model"""
     image_array = np.array(image)
-    face_locations = face_recognition.face_locations(image_array, model=model)
+    frame = cv2.cvtColor(image_array, cv2.COLOR_RGB2BGR)
+    
+    try:
+        faces = DeepFace.extract_faces(frame, enforce_detection=False)
+    except:
+        faces = []
+    
+    face_locations = []
+    for face in faces:
+        facial_area = face['facial_area']
+        face_locations.append((facial_area['y'], facial_area['x'] + facial_area['w'], facial_area['y'] + facial_area['h'], facial_area['x']))
     
     output_image = image_array.copy()
-    output_image_rgb = cv2.cvtColor(output_image, cv2.COLOR_RGB2BGR) if len(output_image.shape) == 3 else output_image
+    output_image_rgb = cv2.cvtColor(output_image, cv2.COLOR_RGB2BGR)
     
     for top, right, bottom, left in face_locations:
         cv2.rectangle(output_image_rgb, (left, top), (right, bottom), (0, 255, 0), 2)
     
-    output_image_rgb = cv2.cvtColor(output_image_rgb, cv2.COLOR_BGR2RGB) if len(output_image_rgb.shape) == 3 else output_image_rgb
+    output_image_rgb = cv2.cvtColor(output_image_rgb, cv2.COLOR_BGR2RGB)
     return output_image_rgb, face_locations
 
 def detect_facial_features(image):
-    """Detect and draw facial landmarks"""
-    image_array = np.array(image)
-    face_landmarks_list = face_recognition.face_landmarks(image_array)
-    
-    pil_image = Image.fromarray(image_array)
-    draw = ImageDraw.Draw(pil_image)
-    
-    features_info = []
-    for face_idx, face_landmarks in enumerate(face_landmarks_list):
-        face_info = {"face": face_idx + 1, "features": {}}
-        
-        for facial_feature in face_landmarks.keys():
-            points = face_landmarks[facial_feature]
-            draw.line(points, fill=(255, 0, 0), width=3)
-            face_info["features"][facial_feature] = len(points)
-        
-        features_info.append(face_info)
-    
-    return np.array(pil_image), face_landmarks_list, features_info
+    """Detect and draw facial landmarks - Note: DeepFace doesn't provide detailed landmarks like face_recognition"""
+    st.warning("Facial landmarks detection is not available with the current setup. This feature requires detailed landmark detection which DeepFace doesn't provide.")
+    return np.array(image), [], []
 
 def calculate_face_distance(image1, image2):
     """Calculate distance between two faces"""
     img1_array = np.array(image1)
     img2_array = np.array(image2)
     
-    encodings1 = face_recognition.face_encodings(img1_array)
-    encodings2 = face_recognition.face_encodings(img2_array)
-    
-    if len(encodings1) == 0:
-        return None, "No face found in first image"
-    if len(encodings2) == 0:
-        return None, "No face found in second image"
-    
-    face_distance = face_recognition.face_distance([encodings1[0]], encodings2[0])[0]
-    return face_distance, None
+    try:
+        result = DeepFace.verify(img1_array, img2_array, model_name='VGG-Face', enforce_detection=False)
+        face_distance = result['distance']
+        return face_distance, None
+    except Exception as e:
+        return None, str(e)
 
 def detect_blink(image):
-    """Detect if eyes are closed"""
-    image_array = np.array(image)
-    face_landmarks_list = face_recognition.face_landmarks(image_array)
-    
-    blink_results = []
-    output_image = image_array.copy()
-    
-    pil_image = Image.fromarray(output_image)
-    draw = ImageDraw.Draw(pil_image)
-    
-    for face_idx, face_landmarks in enumerate(face_landmarks_list):
-        left_eye = face_landmarks.get('left_eye', [])
-        right_eye = face_landmarks.get('right_eye', [])
-        
-        if len(left_eye) >= 6 and len(right_eye) >= 6:
-            ear_left = get_ear(left_eye)
-            ear_right = get_ear(right_eye)
-            avg_ear = (ear_left + ear_right) / 2.0
-            
-            is_closed = avg_ear < 0.2
-            blink_results.append({
-                "face": face_idx + 1,
-                "left_ear": ear_left,
-                "right_ear": ear_right,
-                "avg_ear": avg_ear,
-                "is_closed": is_closed
-            })
-            
-            # Draw eye regions
-            eye_color = (255, 0, 0) if is_closed else (0, 255, 0)
-            for point in left_eye + right_eye:
-                draw.ellipse([point[0]-3, point[1]-3, point[0]+3, point[1]+3], fill=eye_color)
-    
-    output_image = np.array(pil_image)
-    
-    return output_image, blink_results
+    """Detect if eyes are closed - Note: Blink detection requires facial landmarks which are not available"""
+    st.warning("Blink detection is not available with the current setup. This feature requires detailed eye landmark detection.")
+    return np.array(image), []
 
 def get_ear(eye):
     """Calculate Eye Aspect Ratio"""
@@ -203,62 +170,30 @@ def get_ear(eye):
     return ear
 
 def apply_digital_makeup(image):
-    """Apply digital makeup to faces"""
-    image_array = np.array(image)
-    face_landmarks_list = face_recognition.face_landmarks(image_array)
-    
-    pil_image = Image.fromarray(image_array)
-    
-    for face_landmarks in face_landmarks_list:
-        draw = ImageDraw.Draw(pil_image, 'RGBA')
-        
-        # Make the eyebrows
-        if 'left_eyebrow' in face_landmarks:
-            draw.polygon(face_landmarks['left_eyebrow'], fill=(68, 54, 39, 128))
-            draw.line(face_landmarks['left_eyebrow'], fill=(68, 54, 39, 150), width=5)
-        if 'right_eyebrow' in face_landmarks:
-            draw.polygon(face_landmarks['right_eyebrow'], fill=(68, 54, 39, 128))
-            draw.line(face_landmarks['right_eyebrow'], fill=(68, 54, 39, 150), width=5)
-        
-        # Gloss the lips
-        if 'top_lip' in face_landmarks:
-            draw.polygon(face_landmarks['top_lip'], fill=(150, 0, 0, 128))
-            draw.line(face_landmarks['top_lip'], fill=(150, 0, 0, 64), width=8)
-        if 'bottom_lip' in face_landmarks:
-            draw.polygon(face_landmarks['bottom_lip'], fill=(150, 0, 0, 128))
-            draw.line(face_landmarks['bottom_lip'], fill=(150, 0, 0, 64), width=8)
-        
-        # Sparkle the eyes
-        if 'left_eye' in face_landmarks:
-            draw.polygon(face_landmarks['left_eye'], fill=(255, 255, 255, 30))
-            draw.line(face_landmarks['left_eye'] + [face_landmarks['left_eye'][0]], fill=(0, 0, 0, 110), width=6)
-        if 'right_eye' in face_landmarks:
-            draw.polygon(face_landmarks['right_eye'], fill=(255, 255, 255, 30))
-            draw.line(face_landmarks['right_eye'] + [face_landmarks['right_eye'][0]], fill=(0, 0, 0, 110), width=6)
-    
-    return np.array(pil_image), len(face_landmarks_list)
+    """Apply digital makeup to faces - Note: Makeup requires facial landmarks"""
+    st.warning("Digital makeup is not available with the current setup. This feature requires detailed facial landmark detection.")
+    return np.array(image), 0
 
 def blur_faces(image, blur_strength=30):
     """Blur faces in image"""
     image_array = np.array(image)
     frame = cv2.cvtColor(image_array, cv2.COLOR_RGB2BGR)
-    small_frame = cv2.resize(frame, (0, 0), fx=0.25, fy=0.25)
-    rgb_small_frame = cv2.cvtColor(small_frame, cv2.COLOR_BGR2RGB)
     
-    face_locations = face_recognition.face_locations(rgb_small_frame)
+    try:
+        faces = DeepFace.extract_faces(frame, enforce_detection=False)
+    except:
+        faces = []
     
-    for top, right, bottom, left in face_locations:
-        top *= 4
-        right *= 4
-        bottom *= 4
-        left *= 4
+    for face in faces:
+        facial_area = face['facial_area']
+        x, y, w, h = facial_area['x'], facial_area['y'], facial_area['w'], facial_area['h']
         
-        face_image = frame[top:bottom, left:right]
+        face_image = frame[y:y+h, x:x+w]
         face_image = cv2.GaussianBlur(face_image, (99, 99), blur_strength)
-        frame[top:bottom, left:right] = face_image
+        frame[y:y+h, x:x+w] = face_image
     
     output_image = cv2.cvtColor(frame, cv2.COLOR_BGR2RGB)
-    return output_image, len(face_locations)
+    return output_image, len(faces)
 
 # Initialize session state
 if 'processed_count' not in st.session_state:
@@ -299,15 +234,17 @@ with st.sidebar:
     st.subheader("ℹ️ About")
     st.info("""
     **Available Features:**
-    - Face Detection (HOG & CNN)
-    - Face Recognition
-    - Facial Features Detection
-    - Face Distance Calculation
-    - Blink Detection
-    - Digital Makeup
-    - Face Blurring
+    - ✅ Face Detection
+    - ✅ Face Recognition
+    - ❌ Facial Features Detection (requires detailed landmarks)
+    - ✅ Face Distance Calculation
+    - ❌ Blink Detection (requires eye landmarks)
+    - ❌ Digital Makeup (requires facial landmarks)
+    - ✅ Face Blurring
     
-    Upload images or use webcam to try all features!
+    Note: Some advanced features are not available in this cloud deployment due to library limitations. For full functionality, run the app locally with face_recognition library.
+    
+    Upload images or use webcam to try available features!
     """)
 
 # Main content - Multiple tabs for different features
@@ -410,35 +347,7 @@ with tab3:
     st.header("Facial Features Detection")
     st.write("Detect and visualize facial landmarks (eyes, nose, mouth, etc.)")
     
-    col_input, col_webcam = st.columns(2)
-    with col_input:
-        uploaded_file = st.file_uploader("Upload Image", type=['jpg', 'jpeg', 'png'], key="features_upload")
-    with col_webcam:
-        camera_file = st.camera_input("Take Photo", key="features_camera")
-    
-    image = None
-    if uploaded_file is not None:
-        image = Image.open(uploaded_file)
-    elif camera_file is not None:
-        image = Image.open(camera_file)
-    
-    if image is not None:
-        with st.spinner("Detecting facial features..."):
-            processed_image, landmarks_list, features_info = detect_facial_features(image)
-        
-        col1, col2 = st.columns(2)
-        with col1:
-            st.subheader("📸 Original")
-            st.image(image, use_container_width=True)
-        with col2:
-            st.subheader("🎭 Features Detected")
-            st.image(processed_image, use_container_width=True)
-        
-        st.success(f"✅ Detected {len(landmarks_list)} face(s) with facial features!")
-        for info in features_info:
-            with st.expander(f"Face {info['face']} - Facial Features"):
-                for feature, point_count in info['features'].items():
-                    st.write(f"**{feature.replace('_', ' ').title()}:** {point_count} points")
+    st.warning("Facial landmarks detection is not available with the current cloud deployment setup. This feature requires detailed landmark detection which DeepFace doesn't provide. For full functionality, consider running the app locally or using a different deployment platform that supports face_recognition library.")
 
 # Tab 4: Face Distance
 with tab4:
@@ -501,73 +410,14 @@ with tab5:
     st.header("Blink Detection")
     st.write("Detect if eyes are open or closed using Eye Aspect Ratio (EAR)")
     
-    col_input, col_webcam = st.columns(2)
-    with col_input:
-        uploaded_file = st.file_uploader("Upload Image", type=['jpg', 'jpeg', 'png'], key="blink_upload")
-    with col_webcam:
-        camera_file = st.camera_input("Take Photo", key="blink_camera")
-    
-    image = None
-    if uploaded_file is not None:
-        image = Image.open(uploaded_file)
-    elif camera_file is not None:
-        image = Image.open(camera_file)
-    
-    if image is not None:
-        with st.spinner("Detecting blinks..."):
-            processed_image, blink_results = detect_blink(image)
-        
-        col1, col2 = st.columns(2)
-        with col1:
-            st.subheader("📸 Original")
-            st.image(image, use_container_width=True)
-        with col2:
-            st.subheader("👁️ Blink Detection")
-            st.image(processed_image, use_container_width=True)
-        
-        if blink_results:
-            for result in blink_results:
-                with st.expander(f"Face {result['face']} - Eye Status"):
-                    col1, col2 = st.columns(2)
-                    with col1:
-                        st.metric("Left EAR", f"{result['left_ear']:.4f}")
-                        st.metric("Right EAR", f"{result['right_ear']:.4f}")
-                        st.metric("Average EAR", f"{result['avg_ear']:.4f}")
-                    with col2:
-                        status = "👁️ Closed" if result['is_closed'] else "👀 Open"
-                        st.metric("Eye Status", status)
-                        st.info("EAR < 0.2 indicates closed eyes")
+    st.warning("Blink detection is not available with the current cloud deployment setup. This feature requires detailed eye landmark detection which DeepFace doesn't provide. For full functionality, consider running the app locally or using a different deployment platform that supports face_recognition library.")
 
 # Tab 6: Digital Makeup
 with tab6:
     st.header("Digital Makeup")
     st.write("Apply digital makeup to faces (eyebrows, lipstick, eyeliner, eye sparkle)")
     
-    col_input, col_webcam = st.columns(2)
-    with col_input:
-        uploaded_file = st.file_uploader("Upload Image", type=['jpg', 'jpeg', 'png'], key="makeup_upload")
-    with col_webcam:
-        camera_file = st.camera_input("Take Photo", key="makeup_camera")
-    
-    image = None
-    if uploaded_file is not None:
-        image = Image.open(uploaded_file)
-    elif camera_file is not None:
-        image = Image.open(camera_file)
-    
-    if image is not None:
-        with st.spinner("Applying digital makeup..."):
-            processed_image, face_count = apply_digital_makeup(image)
-        
-        col1, col2 = st.columns(2)
-        with col1:
-            st.subheader("📸 Original")
-            st.image(image, use_container_width=True)
-        with col2:
-            st.subheader("💄 With Makeup")
-            st.image(processed_image, use_container_width=True)
-        
-        st.success(f"✅ Applied makeup to {face_count} face(s)!")
+    st.warning("Digital makeup is not available with the current cloud deployment setup. This feature requires detailed facial landmark detection which DeepFace doesn't provide. For full functionality, consider running the app locally or using a different deployment platform that supports face_recognition library.")
 
 # Tab 7: Face Blurring
 with tab7:
